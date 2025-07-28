@@ -1,0 +1,9 @@
+// SocketIO client-side
+function highlightComment(msgId, text) {
+  socket.emit('highlight_comment', {msg_id: msgId, text: text, style: getSelectedStyle()});
+}
+
+socket.on('display_highlight', function(data) {
+  // Display with animation and style
+  showOnStream(data.text, data.style);
+});

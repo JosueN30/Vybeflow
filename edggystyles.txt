@@ -1,0 +1,4 @@
+/* Example edgy styles */
+.gansta-font { font-family: 'Bangers', cursive; color: #ff00cc; text-shadow: 2px 2px #000; }
+.mic-drop { animation: drop 1s cubic-bezier(.68,-0.55,.27,1.55); }
+@keyframes drop { 0% { transform: translateY(-100px); opacity: 0; } 100% { transform: translateY(0); opacity: 1; } }

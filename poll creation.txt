@@ -1,0 +1,9 @@
+// Example: Emit poll creation
+function createPoll(question, options) {
+  socket.emit('create_poll', {question, options});
+}
+
+socket.on('show_poll', function(data) {
+  // Render poll visually with animation
+  renderPoll(data.question, data.options);
+});

@@ -1,26 +1,35 @@
-from flask import Flask, render_template, redirect, url_for, request, session, flash, abort
-from flask_sqlalchemy import SQLAlchemy
+from datetime import datetime, timedelta
+import base64
+import io
+import json
+import os
+import random
+from threading import Thread
+
+from flask import Flask, render_template, redirect, request, session, url_for, abort, flash, jsonify
+from flask_wtf import CSRFProtect
+from flask_limiter import Limiter
+from flask_mail import Mail, Message
+from flask_dance.contrib.facebook import make_facebook_blueprint, facebook
+from flask_dance.contrib.google import make_google_blueprint, google
+from flask_dance.contrib.instagram import make_instagram_blueprint, instagram
+from flask_dance.contrib.snapchat import make_snapchat_blueprint, snapchat
+from flask_limiter import Limiter
+from flask_mail import Mail, Message
+from flask_socketio import SocketIO, emit, join_room, leave_room
+from itsdangerous import URLSafeTimedSerializer
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
-import os
-from flask_dance.contrib.facebook import make_facebook_blueprint, facebook
-from flask_limiter import Limiter
-from datetime import datetime, timedelta
-from flask_mail import Mail, Message
-from itsdangerous import URLSafeTimedSerializer
-from flask_wtf.csrf import CSRFProtect
-import random
-from twilio.rest import Client
-from flask_wtf import FlaskForm
+
+import numpy as np
+import soundfile as sf
 from wtforms import StringField, PasswordField, BooleanField, SubmitField, FileField
 from wtforms.validators import DataRequired, Email, Length, EqualTo, Regexp
-class RegistrationForm(FlaskForm):
-    username = StringField('Username', validators=[DataRequired(), Length(min=3, max=80)])
-    email = StringField('Email', validators=[DataRequired(), Email(), Length(max=120)])
-    password = PasswordField('Password', validators=[DataRequired(), Length(min=6)])
-    confirm_password = PasswordField('Confirm Password', validators=[DataRequired(), EqualTo('password')])
-    submit = SubmitField('Register')
-from flask_socketio import SocketIO, emit, join_room
+from authlib.integrations.flask_client import OAuth
+
+# If you use numpy and soundfile for voice modulation:
+#import numpy as np
+#import soundfile as sf
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.urandom(24)
@@ -59,9 +68,42 @@ facebook_bp = make_facebook_blueprint(
 )
 app.register_blueprint(facebook_bp, url_prefix="/facebook_login")
 
+google_bp = make_google_blueprint(
+    client_id="YOUR_GOOGLE_CLIENT_ID",
+    client_secret="YOUR_GOOGLE_CLIENT_SECRET",
+    scope=["profile", "email"],
+    redirect_to="google_login"
+)
+app.register_blueprint(google_bp, url_prefix="/google_login")
+
+instagram_bp = make_instagram_blueprint(
+    client_id="YOUR_INSTAGRAM_CLIENT_ID",
+    client_secret="YOUR_INSTAGRAM_CLIENT_SECRET",
+    redirect_to="instagram_callback"
+)
+app.register_blueprint(instagram_bp, url_prefix="/instagram_login")
+
+snapchat_bp = make_snapchat_blueprint(
+    client_id="YOUR_SNAPCHAT_CLIENT_ID",
+    client_secret="YOUR_SNAPCHAT_CLIENT_SECRET",
+    redirect_to="snapchat_callback"
+)
+app.register_blueprint(snapchat_bp, url_prefix="/snapchat_login")
+
 mail = Mail(app)
 s = URLSafeTimedSerializer(app.config['SECRET_KEY'])
 socketio = SocketIO(app)
+
+oauth = OAuth(app)
+tiktok = oauth.register(
+    name='tiktok',
+    client_id='YOUR_TIKTOK_CLIENT_KEY',
+    client_secret='YOUR_TIKTOK_CLIENT_SECRET',
+    access_token_url='https://open-api.tiktok.com/oauth/access_token/',
+    authorize_url='https://open-api.tiktok.com/platform/oauth/connect/',
+    api_base_url='https://open-api.tiktok.com/',
+    client_kwargs={'scope': 'user.info.basic'}
+)
 
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -79,9 +121,16 @@ class User(db.Model):
     phone_verified = db.Column(db.Boolean, default=False)
     failed_logins = db.Column(db.Integer, default=0)
     lockout_until = db.Column(db.DateTime, nullable=True)
-    theme = db.Column(db.String(50), default='light')  # New field for user theme preference
+    theme = db.Column(db.String(50), default='light')  # e.g., 'rap', 'gospel', etc.
+    custom_background = db.Column(db.String(255), nullable=True)  # Path or URL to custom background
     is_under_review = db.Column(db.Boolean, default=False)
     review_requested_at = db.Column(db.DateTime, nullable=True)
+    push_subscription = db.Column(db.Text, nullable=True)  # For storing push notification subscriptions
+    facebook_handle = db.Column(db.String(120), nullable=True)
+    instagram_handle = db.Column(db.String(120), nullable=True)
+    tiktok_handle = db.Column(db.String(120), nullable=True)
+    snapchat_handle = db.Column(db.String(120), nullable=True)
+    custom_theme_video = db.Column(db.String(120), nullable=True)  # New field for custom theme video
 
 class Post(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -219,7 +268,9 @@ def contains_hate(text):
 def check_story_for_hate(story):
     if contains_hate(story.media_filename) or contains_hate(story.caption if hasattr(story, 'caption') else ''):
         story.warning_count += 1
-        if story.warning_count >= 3:
+        if story.warning_count == 3:
+            notify(story.user_id, "Warning 3/3: If you do this crap again your account is banned.")
+        if story.warning_count > 3:
             story.is_banned = True
             notify(story.user_id, "Your story was banned for repeated hate speech.")
         else:
@@ -231,6 +282,10 @@ def notify(user_id, message):
     db.session.add(n)
     db.session.commit()
 
+def is_username_allowed(username):
+    # Only block hate/illegal words, not general slang or cursing
+    return not contains_hate(username)
+
 @app.route('/register', methods=['GET', 'POST'])
 def register():
     form = RegistrationForm()
@@ -238,6 +293,9 @@ def register():
         username = form.username.data
         email = form.email.data
         password = form.password.data
+        if not is_username_allowed(username):
+            flash('Username contains prohibited words.')
+            return redirect(url_for('register'))
         if User.query.filter_by(username=username).first():
             flash('Username already exists.')
             return redirect(url_for('register'))
@@ -286,13 +344,32 @@ def logout():
     flash('Logged out successfully.')
     return redirect(url_for('login'))
 
+def get_backgrounds_for_user(user):
+    # Example: Map user.theme or interests to background files
+    theme_backgrounds = {
+        'nature': ['nature1.jpg', 'nature2.mp4'],
+        'art': ['art1.jpg', 'art2.mp4'],
+        'sports': ['sports1.jpg', 'sports2.mp4'],
+        'gospel': ['gospel1.jpg', 'gospel2.mp4'],
+        'rap': ['rap1.jpg', 'rap2.mp4'],
+        'hip_hop': ['hiphop1.jpg', 'hiphop2.mp4'],
+        'gangsta': ['gangsta1.jpg', 'gangsta2.mp4'],
+        # Add more themes and files as needed
+        'default': ['default1.jpg', 'default2.mp4']
+    }
+    theme = getattr(user, 'theme', 'default')
+    return theme_backgrounds.get(theme, theme_backgrounds['default'])
+
 @app.route('/')
 @app.route('/feed')
 def feed():
     if 'user_id' not in session:
         return redirect(url_for('login'))
+    user = User.query.get(session['user_id'])
     posts = Post.query.order_by(Post.id.desc()).all()
-    return render_template('feed.html', posts=posts)
+    backgrounds = get_backgrounds_for_user(user)
+    trending_users = get_trending_users()
+    return render_template('feed.html', posts=posts, backgrounds=backgrounds, trending_users=trending_users)
 
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'mp4', 'glb', 'gltf', 'obj'}
 
@@ -351,6 +428,13 @@ def customize_profile():
     ]
     if request.method == 'POST':
         user.theme = request.form.get('theme', user.theme)
+        # Handle custom background upload
+        if 'custom_background' in request.files:
+            file = request.files['custom_background']
+            if file and allowed_file(file.filename):
+                filename = secure_filename(file.filename)
+                file.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
+                user.custom_background = filename
         db.session.commit()
         flash('Profile customized!')
         return redirect(url_for('profile', username=user.username))
@@ -389,6 +473,68 @@ def facebook_login():
         db.session.commit()
     session['user_id'] = user.id
     return redirect(url_for("feed"))
+
+@app.route('/google')
+def google_login():
+    if not google.authorized:
+        return redirect(url_for("google.login"))
+    resp = google.get("/oauth2/v2/userinfo")
+    google_info = resp.json()
+    google_id = google_info["id"]
+    email = google_info["email"]
+    username = google_info.get("name", email.split("@")[0])
+    user = User.query.filter_by(email=email).first()
+    if not user:
+        user = User(username=username, email=email, is_verified=True)
+        db.session.add(user)
+        db.session.commit()
+    session['user_id'] = user.id
+    flash('Logged in with Google!')
+    return redirect(url_for("feed"))
+
+@app.route('/instagram_callback')
+def instagram_callback():
+    if not instagram.authorized:
+        return redirect(url_for("instagram.login"))
+    resp = instagram.get("/me?fields=id,username,account_type,media_count")
+    info = resp.json()
+    user = User.query.get(session['user_id'])
+    user.instagram_handle = info.get("username")
+    db.session.commit()
+    flash("Instagram linked!")
+    return redirect(url_for('account'))
+
+@app.route('/tiktok_login')
+def tiktok_login():
+    redirect_uri = url_for('tiktok_callback', _external=True)
+    return tiktok.authorize_redirect(redirect_uri)
+
+@app.route('/tiktok_callback')
+def tiktok_callback():
+    token = tiktok.authorize_access_token()
+    resp = tiktok.get('oauth/userinfo/', params={'access_token': token['access_token']})
+    info = resp.json()
+    user = User.query.get(session['user_id'])
+    user.tiktok_handle = info['data']['user']['display_name']
+    db.session.commit()
+    flash("TikTok linked!")
+    return redirect(url_for('account'))
+
+@app.route('/snapchat_login')
+def snapchat_login():
+    redirect_uri = url_for('snapchat_callback', _external=True)
+    return snapchat.authorize_redirect(redirect_uri)
+
+@app.route('/snapchat_callback')
+def snapchat_callback():
+    token = snapchat.authorize_access_token()
+    resp = snapchat.get('me', token=token)
+    info = resp.json()
+    user = User.query.get(session['user_id'])
+    user.snapchat_handle = info['data']['me']['displayName']
+    db.session.commit()
+    flash("Snapchat linked!")
+    return redirect(url_for('account'))
 
 @app.route('/golive', methods=['GET', 'POST'])
 def golive():
@@ -439,6 +585,24 @@ def admin_panel():
     posts = Post.query.order_by(Post.id.desc()).all()
     return render_template('admin.html', users=users, posts=posts)
 
+@app.route('/admin/analytics')
+def admin_analytics():
+    if 'user_id' not in session:
+        return redirect(url_for('login'))
+    user = User.query.get(session['user_id'])
+    if not user.is_admin:
+        abort(403)
+    total_users = User.query.count()
+    total_posts = Post.query.count()
+    total_comments = Comment.query.count()
+    total_likes = Like.query.count()
+    active_today = User.query.filter(User.id.in_(
+        db.session.query(Post.user_id).filter(Post.id > 0)
+    )).count()
+    return render_template('admin_analytics.html', total_users=total_users,
+                           total_posts=total_posts, total_comments=total_comments,
+                           total_likes=total_likes, active_today=active_today)
+
 @app.route('/block/<username>/<duration>')
 def block_user(username, duration):
     if 'user_id' not in session:
@@ -457,6 +621,7 @@ def block_user(username, duration):
         block = Block(blocker_id=session['user_id'], blocked_id=user_to_block.id, expires_at=expires_at)
         db.session.add(block)
     db.session.commit()
+    notify(user_to_block.id, "you got blocked bitch")
     flash(f'User blocked for {duration}.')
     return redirect(url_for('profile', username=username))
 
@@ -491,6 +656,10 @@ def my_compliments():
     compliments = Compliment.query.filter_by(recipient_id=session['user_id']).order_by(Compliment.timestamp.desc()).all()
     return render_template('my_compliments.html', compliments=compliments)
 
+# Serializer for generating tokens
+def get_serializer():
+    return URLSafeTimedSerializer(app.config['SECRET_KEY'])
+
 def send_verification_email(user):
     token = s.dumps(user.email, salt='email-confirm')
     link = url_for('confirm_email', token=token, _external=True)
@@ -518,6 +687,7 @@ def send_reset_email(user):
     msg.body = f'Reset your password: {link}'
     mail.send(msg)
 
+# Route to request password reset
 @app.route('/forgot_password', methods=['GET', 'POST'])
 def forgot_password():
     if request.method == 'POST':
@@ -655,33 +825,23 @@ def messages(username):
         scheduled_at = request.form.get('scheduled_at')
         if scheduled_at:
             msg.scheduled_at = datetime.strptime(scheduled_at, "%Y-%m-%dT%H:%M")
-            # Only show messages where scheduled_at is None or <= now
-        db.session.add(msg)
-        db.session.commit()
-        notify(recipient.id, f"New message from {session['user_id']}")
-        # Real-time notification placeholder (implement if using SocketIO or similar)
-        flash('Message sent!')
-        return redirect(url_for('messages', username=username))
-    # Fetch messages between users
-    msgs = Message.query.filter(
-        ((Message.sender_id == session['user_id']) & (Message.recipient_id == recipient.id)) |
-        ((Message.sender_id == recipient.id) & (Message.recipient_id == session['user_id']))
-    ).order_by(Message.timestamp.asc()).all()
-    # Mark as read and delete self-destructing messages
-    for m in msgs:
-        if m.recipient_id == session['user_id'] and not m.is_read:
-            m.is_read = True
-            if m.self_destruct:
-                db.session.delete(m)
-    db.session.commit()
-    return render_template('messages.html', recipient=recipient, messages=msgs)
+            db.session.add(msg)
+            db.session.commit()
+            flash('Message scheduled.')
+            return redirect(request.referrer)
+    messages = Message.query.filter(
+        (Message.sender_id == session['user_id']) | (Message.recipient_id == session['user_id'])
+    ).order_by(Message.timestamp.desc()).all()
+    return render_template('messages.html', recipient=recipient, messages=messages)
 
 @app.route('/edit_message/<int:msg_id>', methods=['POST'])
 def edit_message(msg_id):
+    if 'user_id' not in session:
+        return redirect(url_for('login'))
     msg = Message.query.get_or_404(msg_id)
     if msg.sender_id != session['user_id']:
         abort(403)
-    msg.text = request.form['text']
+    msg.text = request.form.get('text')
     db.session.commit()
     flash('Message edited.')
     return redirect(request.referrer)
@@ -709,6 +869,8 @@ def upload_story():
             story = Story(user_id=session['user_id'], media_filename=filename, expires_at=expires_at)
             db.session.add(story)
             db.session.commit()
+            # Start async review for harmful content
+            Thread(target=async_review_story, args=(story.id,)).start()
             flash('Story uploaded!')
             return redirect(url_for('stories'))
     return render_template('upload_story.html')
@@ -800,45 +962,255 @@ def onboarding():
 
 
 # (Removed CSS. Place these styles in your static CSS file or in a <style> block in your HTML templates.)
+@app.route('/terms')
+def terms():
+    return render_template('terms.html')
 
-from datetime import datetime, timedelta
+@app.route('/privacy')
+def privacy():
+    return render_template('privacy.html')
 
-def process_account_reviews():
-    one_day_ago = datetime.utcnow() - timedelta(days=1)
-    users = User.query.filter(User.is_under_review == True, User.review_requested_at <= one_day_ago).all()
-    for user in users:
-        # If admin hasn't approved, auto-ban
-        ban = Ban(user_id=user.id, expires_at=None)
-        db.session.add(ban)
-        user.is_under_review = False
-        db.session.commit()
-        notify(user.id, "Your account was banned after review.")
+@app.route('/cookie')
+def cookie():
+    return render_template('cookie.html')
 
-@app.route('/admin/review_accounts', methods=['GET', 'POST'])
-def review_accounts():
+# (Removed misplaced HTML/JS. Place the following in your HTML template before </body> if needed:)
+# <!-- Add this just before </body> in your base template (e.g., base.html or register.html) -->
+# <script>
+# if ('serviceWorker' in navigator) {
+#     window.addEventListener('load', function() {
+#         navigator.serviceWorker.register('/static/service-worker.js')
+#             .then(function(registration) {
+#                 // Registration successful
+#             })
+#             .catch(function(error) {
+#                 // Registration failed
+#             });
+#     });
+# }
+# </script>
+
+from flask import request, jsonify
+@app.route('/api/save_push_subscription', methods=['POST'])
+@login_required
+def save_push_subscription():
+    sub = request.get_json()
+    # Save sub to DB, associated with current_user.id
+    current_user.push_subscription = json.dumps(sub)
+    db.session.commit()
+    return jsonify({'ok': True})
+
+
+
+
+from pywebpush import webpush, WebPushException
+
+def send_push(user, title, body, url='/'):
+    sub = json.loads(user.push_subscription)
+    try:
+        webpush(
+            subscription_info=sub,
+            data=json.dumps({'title': title, 'body': body, 'url': url}),
+            vapid_private_key=VAPID_PRIVATE_KEY,
+            vapid_claims={"sub": "mailto:your@email.com"}
+        )
+    except WebPushException as ex:
+        print("Push failed:", ex)
+
+# The following Dart/Flutter code was removed because it is not valid Python.
+# If you need to use Firebase Messaging, place this code in your Flutter/Dart project, not in your Python backend.
+
+# (Removed invalid JavaScript/React and CSS code. If needed, place this code in the appropriate frontend files.)
+
+@app.route('/discover', methods=['GET', 'POST'])
+def discover():
     if 'user_id' not in session:
         return redirect(url_for('login'))
-    admin = User.query.get(session['user_id'])
-    if not admin or not admin.is_admin:
-        abort(403)
-    users = User.query.filter_by(is_under_review=True).all()
+    results = []
+    query = ''
     if request.method == 'POST':
-        user_id = int(request.form['user_id'])
-        action = request.form['action']
-        user = User.query.get(user_id)
-        if action == 'approve':
-            user.is_under_review = False
-            user.review_requested_at = None
-            db.session.commit()
-            notify(user.id, "Your account has been approved by an administrator.")
-            flash(f"User {user.username} approved.")
-        elif action == 'ban':
-            ban = Ban(user_id=user.id, expires_at=None)
-            db.session.add(ban)
-            user.is_under_review = False
-            user.review_requested_at = None
-            db.session.commit()
-            notify(user.id, "Your account was banned after review.")
-            flash(f"User {user.username} banned.")
-        return redirect(url_for('review_accounts'))
-    return render_template('review_accounts.html', users=users)
+        query = request.form['query']
+        # Search Vybe Flow users
+        results = User.query.filter(
+            (User.username.ilike(f'%{query}%')) |
+            (User.email.ilike(f'%{query}%')) |
+            (User.bio.ilike(f'%{query}%'))
+        ).all()
+        # Optionally: Integrate with Facebook/Twitter/Snapchat APIs for universal search
+        # (You would need to use their APIs and OAuth for this, not shown here for brevity)
+    return render_template('discover.html', results=results, query=query)
+def get_trending_users(limit=10):
+
+    # Example: users with most followers
+    trending = db.session.query(User, db.func.count(Follow.id).label('fcount'))\
+        .join(Follow, Follow.followed_id == User.id)\
+        .group_by(User.id)\
+        .order_by(db.desc('fcount'))\
+        .limit(limit).all()
+    return [u for u, _ in trending]
+
+@app.route('/dashboard')
+def dashboard():
+    if 'user_id' not in session:
+        return redirect(url_for('login'))
+    user = User.query.get(session['user_id'])
+    posts = Post.query.filter_by(user_id=user.id).all()
+    post_likes = {p.id: Like.query.filter_by(post_id=p.id).count() for p in posts}
+    post_comments = {p.id: Comment.query.filter_by(post_id=p.id).count() for p in posts}
+    follower_count = Follow.query.filter_by(followed_id=user.id).count()
+    story_views = StoryView.query.join(Story, StoryView.story_id == Story.id)\
+        .filter(Story.user_id == user.id).count()
+    return render_template(
+        'dashboard.html',
+        posts=posts,
+        post_likes=post_likes,
+        post_comments=post_comments,
+        follower_count=follower_count,
+        story_views=story_views
+    )
+
+@app.route('/add_friend', methods=['POST'])
+def add_friend():
+    if 'user_id' not in session:
+        return jsonify({'error': 'Login required'}), 401
+    username = request.form['username']
+    user = User.query.filter_by(username=username).first()
+    if not user:
+        # Try searching by social handles
+        user = User.query.filter(
+            (User.facebook_handle == username) |
+            (User.instagram_handle == username) |
+            (User.tiktok_handle == username) |
+            (User.snapchat_handle == username)
+        ).first()
+    if not user:
+        return jsonify({'error': 'User not found'}), 404
+    # Unlimited requests: no limit logic
+    if not Follow.query.filter_by(follower_id=session['user_id'], followed_id=user.id).first():
+        db.session.add(Follow(follower_id=session['user_id'], followed_id=user.id))
+        db.session.commit()
+        notify(user.id, f"{User.query.get(session['user_id']).username} sent you a friend/follow request!")
+    return jsonify({'ok': True})
+
+import re
+
+SCAM_PATTERNS = [
+    r'free\s+money', r'cash\s+app', r'bitcoin', r'giveaway', r'click\s+here', r'win\s+\$\d+'
+]
+
+def is_scam(text):
+    text = text.lower()
+    return any(re.search(pattern, text) for pattern in SCAM_PATTERNS)
+
+import spacy
+
+nlp = spacy.load("en_core_web_sm")
+
+SCAM_KEYWORDS = ["free money", "cash app", "bitcoin", "giveaway", "click here", "win $"]
+
+def is_scam_advanced(text):
+    doc = nlp(text.lower())
+    # Keyword check
+    if any(kw in doc.text for kw in SCAM_KEYWORDS):
+        return True
+    # ML/NLP-based: add your own logic or use a trained model
+    # Example: Use a cloud API or custom model for more advanced detection
+    return False
+
+@app.route('/send_message', methods=['POST'])
+def send_message():
+    if 'user_id' not in session:
+        return jsonify({'error': 'Login required'}), 401
+    recipient_id = int(request.form['recipient_id'])
+    text = request.form['text']
+    if is_scam(text):
+        # Block sender and notify
+        block = Block(blocker_id=recipient_id, blocked_id=session['user_id'], expires_at=datetime.utcnow() + timedelta(days=3650))
+        db.session.add(block)
+        db.session.commit()
+        notify(session['user_id'], "you got blocked bitch")
+        notify(recipient_id, "you got blocked bitch")
+        return jsonify({'error': 'Scam detected. You are blocked.'}), 403
+    # ...normal message sending logic...
+
+import requests
+
+def search_facebook_user(access_token, query):
+    url = f"https://graph.facebook.com/v19.0/search"
+    params = {
+        "q": query,
+        "type": "user",
+        "access_token": access_token
+    }
+    resp = requests.get(url, params=params)
+    return resp.json()
+
+@app.route('/link_social', methods=['POST'])
+def link_social():
+    if 'user_id' not in session:
+        return redirect(url_for('login'))
+    user = User.query.get(session['user_id'])
+    user.facebook_handle = request.form.get('facebook')
+    user.instagram_handle = request.form.get('instagram')
+    user.tiktok_handle = request.form.get('tiktok')
+    user.snapchat_handle = request.form.get('snapchat')
+    db.session.commit()
+    flash('Social accounts linked!')
+    return redirect(url_for('account'))
+
+import os
+from werkzeug.utils import secure_filename
+
+ALLOWED_THEME_VIDEO_EXTENSIONS = {'mp4', 'webm'}
+THEME_VIDEO_FOLDER = os.path.join(app.static_folder, 'themes')
+
+def allowed_theme_video(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_THEME_VIDEO_EXTENSIONS
+
+@app.route('/upload_theme_video', methods=['POST'])
+@login_required
+def upload_theme_video():
+    if 'theme_video' not in request.files:
+        flash('No file part')
+        return redirect(request.referrer)
+    file = request.files['theme_video']
+    if file.filename == '':
+        flash('No selected file')
+        return redirect(request.referrer)
+    if file and allowed_theme_video(file.filename):
+        filename = secure_filename(f"{session['user_id']}_{file.filename}")
+        filepath = os.path.join(THEME_VIDEO_FOLDER, filename)
+        file.save(filepath)
+        # Save the filename to the user's profile or story draft as needed
+        user = User.query.get(session['user_id'])
+        user.custom_theme_video = filename
+        db.session.commit()
+        flash('Theme video uploaded!')
+        return redirect(url_for('story_create'))
+    else:
+        flash('Invalid file type. Only MP4 and WebM allowed.')
+        return redirect(request.referrer)
+
+@app.route('/create_story', methods=['POST'])
+@login_required
+def create_story():
+    # ...existing story fields...
+    theme_video_filename = None
+    if 'theme_video' in request.files:
+        file = request.files['theme_video']
+        if file and file.filename and allowed_theme_video(file.filename):
+            theme_video_filename = secure_filename(f"{session['user_id']}_{int(time.time())}_{file.filename}")
+            file.save(os.path.join(THEME_VIDEO_FOLDER, theme_video_filename))
+    # Create the story with the theme video filename
+    story = Story(
+        user_id=session['user_id'],
+        # ...other fields...
+        theme_video=theme_video_filename
+    )
+    db.session.add(story)
+    db.session.commit()
+    flash('Story posted!')
+    return redirect(url_for('story_view', story_id=story.id))
+
+# (HTML/JS for story_view.html removed from Python file. Place it in your story_view.html template.)
+
