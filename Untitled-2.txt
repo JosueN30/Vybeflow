@@ -1,9 +1,0 @@
-{% extends "base.html" %}
-{% block content %}
-<header>
-    <h1>Vybe Flow Feed</h1>
-</header>
-<div class="container">
-    <!-- Feed content here -->
-</div>
-{% endblock %}

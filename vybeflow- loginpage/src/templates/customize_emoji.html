@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Customize Emojis</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <h1>Customize Your Emojis</h1>
+        <form action="{{ url_for('emoji.customize') }}" method="POST">
+            <div class="emoji-list">
+                {% for emoji in emojis %}
+                    <div class="emoji-item">
+                        <span class="emoji-character">{{ emoji.emoji_character }}</span>
+                        <input type="text" name="emoji_{{ emoji.id }}" placeholder="Customize this emoji">
+                    </div>
+                {% endfor %}
+            </div>
+            <button type="submit">Save Changes</button>
+        </form>
+        <a href="{{ url_for('feed') }}">Back to Feed</a>
+    </div>
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html>
