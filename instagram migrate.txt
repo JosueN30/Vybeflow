@@ -1,0 +1,1 @@
+flask db migrate -m "Add instagram_access_token column"
