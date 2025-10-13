@@ -1,43 +1,86 @@
-# Vybe Flow
 
-Vybe Flow is a social networking application that allows users to register, log in, and share posts with images and captions. The application is built using Flask and SQLite, providing a simple yet functional platform for users to connect and share their experiences.
+# VybeFlow Messaging App
+
+Welcome to the VybeFlow Messaging App! This application allows users to send messages, share posts, and customize emojis for a personalized social experience.
 
 ## Features
 
 - User registration and authentication
 - Upload images with captions
 - View a feed of posts from all users
+- Send and receive messages in real-time
+- Customize emojis by adding, editing, and deleting them
+- User-friendly chat interface
 - Secure session management
 - Responsive design with HTML templates
 
-## Setup Instructions
+## Project Structure
 
-1. **Clone the repository:**
+```
+vybeflow-messaging-app
+├── src
+│   ├── app.py                # Entry point of the application
+│   ├── models                # Contains database models
+│   │   ├── __init__.py
+│   │   ├── user.py           # User model
+│   │   ├── message.py        # Message model
+│   │   └── emoji.py          # Emoji model
+│   ├── routes                # Contains route handlers
+│   │   ├── __init__.py
+│   │   ├── auth.py           # Authentication routes
+│   │   ├── messaging.py      # Messaging routes
+│   │   └── emoji.py          # Emoji customization routes
+│   ├── templates             # HTML templates
+│   │   ├── base.html         # Base template
+│   │   ├── chat.html         # Chat interface template
+│   │   ├── customize_emoji.html # Emoji customization template
+│   │   └── login.html        # Login page template
+│   ├── static                # Static files (CSS, JS)
+│   │   ├── css
+│   │   │   └── style.css     # CSS styles
+│   │   └── js
+│   │       └── main.js       # JavaScript functionality
+│   └── config.py             # Configuration settings
+├── requirements.txt           # Project dependencies
+└── README.md                  # Project documentation
+```
+
+## Installation
+
+1. Clone the repository:
    ```
-   git clone <repository-url>
-   cd vybe-flow
+   git clone https://github.com/yourusername/vybeflow-messaging-app.git
+   cd vybeflow-messaging-app
    ```
 
-2. **Create a virtual environment:**
-   ```
-   python -m venv venv
-   source venv/bin/activate  # On Windows use `venv\Scripts\activate`
-   ```
-
-3. **Install dependencies:**
+2. Install the required dependencies:
    ```
    pip install -r requirements.txt
    ```
 
-4. **Run the application:**
+3. Set up the database:
    ```
-   python app.py
+   flask db upgrade
    ```
 
-5. **Access the application:**
-   Open your web browser and go to `http://127.0.0.1:5000`.
+4. Run the application:
+   ```
+   flask run
+   ```
 
-## Usage Guidelines
+## Usage
+
+- Navigate to `http://localhost:5000` in your web browser to access the application.
+- Register a new account or log in with an existing account.
+- Start chatting, sharing posts, and customizing your emojis!
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit a pull request or open an issue for any suggestions or improvements.
+
+## License
+
+This project is licensed under the MIT License. See the LICENSE file for details.
 
 - **Registration:** Navigate to the registration page to create a new account.
 - **Login:** Use your credentials to log in to your account.

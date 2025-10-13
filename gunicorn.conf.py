@@ -1,3 +1,41 @@
+# FIX 1: Add the application entry point
+wsgi_app = "wsgi:app" 
+
+# Server socket
+bind = "0.0.0.0:8000"
+# ... (rest of process and logging config)
+
+# Process naming
+proc_name = "vybeflow"
+
+# Server mechanics
+daemon = False
+# FIX 2: Use a persistent location for the PID file
+pidfile = "/var/run/vybeflow/vybeflow.pid" 
+# FIX 3: Set a dedicated, non-root user for security
+user = "vybeflow" 
+group = "vybeflow"
+tmp_upload_dir = None
+# Gunicorn configuration file for VybeFlow production
+
+# FIX: Add the application entry point
+wsgi_app = "wsgi:app"
+
+# Server socket
+bind = "0.0.0.0:8000"
+# ... (backlog, worker_class, connections, timeout, keepalive, security limits remain the same)
+
+# Process naming
+proc_name = "vybeflow"
+
+# Server mechanics
+daemon = False
+# FIX: Use a persistent location for the PID file
+pidfile = "/var/run/vybeflow/vybeflow.pid"
+# FIX: Set a dedicated, non-root user for security
+user = "vybeflow"
+group = "vybeflow"
+tmp_upload_dir = None
 # Gunicorn configuration file for VybeFlow production
 
 # Server socket

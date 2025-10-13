@@ -3,7 +3,17 @@ function createPoll(question, options) {
   socket.emit('create_poll', {question, options});
 }
 
+// NOTE: Ensure 'const socket = io();' is present in your main JavaScript file.
+
+// Example: Emit poll creation
+function createPoll(question, options) {
+  socket.emit('create_poll', {question, options});
+}
+
 socket.on('show_poll', function(data) {
+  // Render poll visually with animation
+  renderPoll(data.question, data.options);
+});
   // Render poll visually with animation
   renderPoll(data.question, data.options);
 });

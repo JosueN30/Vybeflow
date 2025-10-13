@@ -1,2 +1,0 @@
-# If you want to render this HTML in a Flask template, move this line to a .html or .jinja2 template file.
-# If you want to serve the CSS in Python, use Flask's render_template function and put this in your template.
