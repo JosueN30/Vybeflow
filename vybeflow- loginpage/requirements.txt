@@ -4,3 +4,4 @@ Flask-Login==0.5.0
 Flask-Dance==5.0.0
 requests==2.26.0
 python-dotenv==0.19.2
+urllib3>=2.6.0 # not directly required, pinned by Snyk to avoid a vulnerability
