@@ -1,0 +1,241 @@
+import os, json, uuid
+from datetime import datetime
+from werkzeug.utils import secure_filename
+from flask import Blueprint, current_app, render_template, request, redirect, url_for, flash, abort, session
+
+from __init__ import db
+from models import Story
+from vision_scanner import scan_story_media
+
+story_bp = Blueprint("story", __name__)
+
+ALLOWED_IMAGE_EXT = {"png", "jpg", "jpeg", "webp", "gif", "heic", "heif", "avif", "bmp", "tiff", "tif"}
+ALLOWED_VIDEO_EXT = {"mp4", "webm", "mov", "m4v", "mkv", "avi", "flv", "wmv", "3gp", "ts", "mts", "m2ts"}
+MAX_IMAGE_BYTES = 30 * 1024 * 1024  # 30MB for images
+MAX_VIDEO_BYTES = 1024 * 1024 * 1024  # 1GB for large video files
+
+def _ext(filename: str) -> str:
+    return (filename.rsplit(".", 1)[-1] or "").lower()
+
+def _is_allowed(filename: str) -> bool:
+    e = _ext(filename)
+    return e in ALLOWED_IMAGE_EXT or e in ALLOWED_VIDEO_EXT
+
+def _media_type(filename: str) -> str:
+    e = _ext(filename)
+    return "video" if e in ALLOWED_VIDEO_EXT else "image"
+
+def _save_upload(file_storage):
+    if not file_storage or not file_storage.filename:
+        raise ValueError("No file provided")
+
+    filename = secure_filename(file_storage.filename)
+    if not filename or not _is_allowed(filename):
+        raise ValueError("Unsupported file type")
+
+    # size guard (works if Content-Length is available)
+    # fallback: read stream size without loading into memory? (Werkzeug can stream)
+    file_storage.stream.seek(0, os.SEEK_END)
+    size = file_storage.stream.tell()
+    file_storage.stream.seek(0)
+
+    mtype = _media_type(filename)
+    if mtype == "image" and size > MAX_IMAGE_BYTES:
+        raise ValueError("Image too large")
+    if mtype == "video" and size > MAX_VIDEO_BYTES:
+        raise ValueError("Video too large")
+
+    upload_dir = os.path.join(current_app.root_path, "static", "uploads", "stories")
+    os.makedirs(upload_dir, exist_ok=True)
+
+    unique = f"{uuid.uuid4().hex}_{filename}"
+    abs_path = os.path.join(upload_dir, unique)
+    file_storage.save(abs_path)
+
+    url_path = f"/static/uploads/stories/{unique}"
+    return url_path, mtype
+
+def _clean_overlay_json(raw: str) -> str:
+    """
+    We store JSON, but we also sanitize it so nobody injects weird stuff.
+    Only allow certain keys and safe lengths.
+    """
+    if not raw:
+        return ""
+
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return ""
+
+    if not isinstance(data, list):
+        return ""
+
+    cleaned = []
+    for item in data[:50]:  # cap number of overlays
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("kind", ""))[:16]
+        if kind not in ("text", "sticker", "link"):
+            continue
+
+        x = float(item.get("x", 0) or 0)
+        y = float(item.get("y", 0) or 0)
+        x = max(0, min(10000, x))
+        y = max(0, min(10000, y))
+
+        base = {"kind": kind, "x": x, "y": y}
+
+        if kind == "text":
+            txt = str(item.get("text", ""))[:220]
+            try:
+                fs = int(item.get("fontSize", 22) or 22)
+            except (ValueError, TypeError):
+                fs = 22
+            fs = max(10, min(72, fs))
+            base.update({"text": txt, "fontSize": fs})
+
+        if kind == "sticker":
+            emoji = str(item.get("emoji", ""))[:10]
+            base.update({"emoji": emoji})
+
+        if kind == "link":
+            label = str(item.get("label", "Visit link"))[:30]
+            url = str(item.get("url", ""))[:500]
+            fs = int(item.get("fontSize", 18) or 18)
+            fs = max(10, min(48, fs))
+            base.update({"label": label, "url": url, "fontSize": fs})
+
+        cleaned.append(base)
+
+    return json.dumps(cleaned)
+
+@story_bp.route("/stories", methods=["GET"])
+def stories_feed():
+    """Display the stories feed with tray of active stories"""
+    current_user = session.get('username') or 'User'
+    
+    # Get all active (non-expired) stories
+    now = datetime.utcnow()
+    all_stories = Story.query.filter(Story.created_at.isnot(None)).all()
+    active_stories = [s for s in all_stories if not s.is_expired()]
+    
+    # Build story tray data
+    story_tray = []
+    for story in active_stories:
+        story_tray.append({
+            'id': story.id,
+            'username': current_user,  # Replace with actual user when auth is ready
+            'avatar': None,
+            'media_url': story.media_url,
+            'media_type': story.media_type,
+            'created_at': story.created_at,
+            'title': story.title,
+            'caption': story.caption,
+        })
+    
+    return render_template("stories.html", story_tray=story_tray, current_user=current_user)
+
+@story_bp.route("/stories/new", methods=["GET"])
+def new_story():
+    current_user = session.get('username') or 'User'
+    return render_template("story_create.html", current_user=current_user)
+
+@story_bp.route("/stories/new", methods=["POST"])
+def create_story():
+    try:
+        media = request.files.get("media")
+        media_url, media_type = _save_upload(media)
+
+        title = (request.form.get("title") or "").strip()
+        if not title:
+            raise ValueError("Title is required")
+
+        caption = (request.form.get("caption") or "").strip()[:220]
+        location = (request.form.get("location") or "").strip()[:100]
+        music_track = (request.form.get("music_track") or "").strip()[:180]
+        mentions = (request.form.get("mentions") or "").strip()[:500]
+
+        audience = (request.form.get("audience") or "public").strip()
+        if audience not in ("public", "friends", "close_friends"):
+            audience = "public"
+
+        duration = (request.form.get("duration") or "24h").strip()
+        if duration not in ("24h", "48h", "7d"):
+            duration = "24h"
+
+        effects = (request.form.get("effects") or "").strip()[:400]
+        graphics = (request.form.get("graphics") or "").strip()[:400]
+
+        overlay_raw = request.form.get("overlay_json") or ""
+        overlay_json = _clean_overlay_json(overlay_raw)
+
+        link_url = (request.form.get("link_url") or "").strip()[:500]
+        if link_url and not (link_url.startswith("http://") or link_url.startswith("https://")):
+            # don't allow javascript: or other nonsense
+            link_url = ""
+
+        story = Story(
+            user_id=None,  # plug in current_user.id if you have login
+            title=title,
+            caption=caption,
+            location=location,
+            music_track=music_track,
+            mentions=mentions,
+            audience=audience,
+            duration=duration,
+            effects=effects,
+            graphics=graphics,
+            media_url=media_url,
+            media_type=media_type,
+            overlay_json=overlay_json,
+            link_url=link_url,
+            created_at=datetime.utcnow(),
+        )
+        db.session.add(story)
+        db.session.commit()
+
+        # ── Cloud Vision AI scan (non-blocking) ──────────────────────────────
+        # Runs after commit so the story is always saved even if the scan fails.
+        try:
+            abs_media = os.path.join(
+                current_app.root_path,
+                media_url.lstrip("/").replace("/", os.sep),
+            )
+            scan_result = scan_story_media(abs_media, media_type)
+            if scan_result["is_sensitive"]:
+                story.is_sensitive = True
+                story.sensitivity_score = round(scan_result["score"], 4)
+                db.session.commit()
+                current_app.logger.info(
+                    "Story %s flagged sensitive by vision scan (score=%.2f labels=%s)",
+                    story.id, scan_result["score"], scan_result["labels"],
+                )
+        except Exception:
+            current_app.logger.exception(
+                "Vision scan failed for story %s — upload kept", story.id
+            )
+        # ─────────────────────────────────────────────────────────────────────
+
+        return redirect(url_for("story.view_story", story_id=story.id))
+
+    except Exception as e:
+        current_app.logger.exception("Story create failed")
+        flash(str(e), "error")
+        return redirect(url_for("story.new_story"))
+
+@story_bp.route("/stories/<int:story_id>", methods=["GET"])
+def view_story(story_id: int):
+    story = Story.query.get_or_404(story_id)
+    if story.is_expired():
+        abort(404)
+
+    overlays = []
+    if story.overlay_json:
+        try:
+            overlays = json.loads(story.overlay_json)
+        except Exception:
+            overlays = []
+
+    current_user = session.get('username') or 'User'
+    return render_template("story_view.html", story=story, overlays=overlays, current_user=current_user)

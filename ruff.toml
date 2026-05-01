@@ -1,0 +1,41 @@
+# Ruff configuration for VybeFlow
+# https://docs.astral.sh/ruff/configuration/
+
+line-length = 120
+target-version = "py311"
+
+[lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes — unused imports (F401), undefined names (F821), etc.
+    "I",   # isort — import ordering
+    "S",   # flake8-bandit — security checks (OWASP Top 10 style)
+    "B",   # flake8-bugbear — likely bugs
+    "UP",  # pyupgrade — modernise syntax automatically
+    "RUF", # Ruff-native rules
+]
+ignore = [
+    "E501",  # line too long — handled by formatter
+    "S101",  # assert statements OK in tests
+    "S105",  # possible hardcoded password — too noisy for config files
+    "S106",
+    "S311",  # random is fine for non-crypto use
+]
+
+# Auto-fix everything Ruff can fix (unused imports, style issues, etc.)
+fixable = ["ALL"]
+unfixable = []
+
+[lint.per-file-ignores]
+# Test files can use assert and broad imports freely
+"tests/**" = ["S", "F401"]
+"_test_*.py" = ["S", "F401"]
+"_check_*.py" = ["S", "F401"]
+
+[format]
+# Match Black's style
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"

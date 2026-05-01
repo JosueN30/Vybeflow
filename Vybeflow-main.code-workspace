@@ -1,0 +1,11 @@
+{
+	"folders": [
+		{
+			"path": "."
+		}
+	],
+	"settings": {
+		"problems.decorations.enabled": true,
+		"problems.showCurrentInStatus": true
+	}
+}

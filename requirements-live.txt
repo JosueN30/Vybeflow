@@ -1,0 +1,6 @@
+flask
+flask-login
+flask-socketio
+redis
+eventlet
+livekit-api

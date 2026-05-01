@@ -46,7 +46,9 @@ backlog = 2048
 workers = 4
 worker_class = "sync"
 worker_connections = 1000
-timeout = 30
+# Increased from 30 → 600 to handle GB-sized video uploads without timing out.
+# A 1 GB upload on a 50 Mbps connection takes ~160 s; 600 s gives 3× headroom.
+timeout = 600
 keepalive = 2
 
 # Restart workers after this many requests, to prevent memory leaks
